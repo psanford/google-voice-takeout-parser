@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
+	_ "modernc.org/sqlite"
 )
 
 type Conversation struct {
@@ -33,12 +36,31 @@ type Message struct {
 }
 
 func main() {
+	format := flag.String("format", "json", "Output format: json or sqlite")
+	flag.Parse()
+
+	if *format != "json" && *format != "sqlite" {
+		log.Fatal("Invalid format. Use 'json' or 'sqlite'")
+	}
+
 	files, err := filepath.Glob("*.html")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	parentLgr := slog.Default()
+
+	var output func(Conversation)
+	switch *format {
+	case "json":
+		output = outputJSON
+	case "sqlite":
+		db := initSQLiteDB()
+		defer db.Close()
+		output = func(conv Conversation) {
+			outputSQLite(db, conv)
+		}
+	}
 
 	for _, file := range files {
 		lgr := parentLgr.With("file", file)
@@ -47,28 +69,178 @@ func main() {
 			lgr.Error("error opening file", "err", err)
 			continue
 		}
-		defer f.Close()
 
 		conversation, err := parseFile(lgr, f)
 		if err != nil {
 			lgr.Error("error parsing file", "err", err)
+			f.Close()
 			continue
 		}
 
+		f.Close()
+
 		if conversation.Type == "" {
-			lgr.Error("falsed to parse file correctly")
-			os.Exit(1)
+			lgr.Error("failed to parse file correctly")
+			continue
 		}
 
 		conversation.SourceFile = file
+		output(conversation)
+	}
+}
 
-		jsonData, err := json.Marshal(conversation)
+func outputJSON(conversation Conversation) {
+	jsonData, err := json.Marshal(conversation)
+	if err != nil {
+		log.Printf("error marshaling JSON for file %s: %v", conversation.SourceFile, err)
+		return
+	}
+	fmt.Println(string(jsonData))
+}
+
+func initSQLiteDB() *sql.DB {
+	dbName := "conversations.db"
+	db, err := sql.Open("sqlite", dbName)
+	if err != nil {
+		log.Fatalf("Failed to open SQLite database: %v", err)
+	}
+
+	_, err = db.Exec("PRAGMA journal_mode=WAL")
+	if err != nil {
+		log.Fatalf("PRAGMA journal_mode=WAL error: %s", err)
+	}
+
+	createTables(db)
+	log.Printf("SQLite database initialized: %s", dbName)
+	return db
+}
+
+func outputSQLite(db *sql.DB, conv Conversation) {
+	insertConversation(db, conv)
+}
+
+func createTables(db *sql.DB) {
+	createTableQueries := []string{
+		`CREATE TABLE IF NOT EXISTS conversations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			type TEXT,
+			timestamp DATETIME,
+			duration TEXT,
+			transcript TEXT,
+			source_file TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS participants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			conversation_id INTEGER,
+			name TEXT,
+			phone_number TEXT,
+			FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			conversation_id INTEGER,
+			timestamp DATETIME,
+			sender TEXT,
+			sender_number TEXT,
+			content TEXT,
+			FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message_id INTEGER,
+			image_url TEXT,
+			FOREIGN KEY (message_id) REFERENCES messages (id)
+		)`,
+	}
+
+	for _, query := range createTableQueries {
+		if _, err := db.Exec(query); err != nil {
+			log.Fatalf("Failed to create table: %v", err)
+		}
+	}
+}
+
+func insertConversation(db *sql.DB, conv Conversation) {
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("Failed to begin transaction: %v", err)
+		return
+	}
+	defer tx.Rollback()
+
+	// Insert conversation
+	convStmt, err := tx.Prepare("INSERT INTO conversations (type, timestamp, duration, transcript, source_file) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		log.Printf("Failed to prepare conversation statement: %v", err)
+		return
+	}
+	defer convStmt.Close()
+
+	result, err := convStmt.Exec(conv.Type, conv.Timestamp, conv.Duration, conv.Transcript, conv.SourceFile)
+	if err != nil {
+		log.Printf("Failed to insert conversation: %v", err)
+		return
+	}
+
+	convID, err := result.LastInsertId()
+	if err != nil {
+		log.Printf("Failed to get last insert ID: %v", err)
+		return
+	}
+
+	// Insert participants
+	partStmt, err := tx.Prepare("INSERT INTO participants (conversation_id, name, phone_number) VALUES (?, ?, ?)")
+	if err != nil {
+		log.Printf("Failed to prepare participant statement: %v", err)
+		return
+	}
+	defer partStmt.Close()
+
+	for name, number := range conv.Participants {
+		if _, err := partStmt.Exec(convID, name, number); err != nil {
+			log.Printf("Failed to insert participant: %v", err)
+			return
+		}
+	}
+
+	// Insert messages and images
+	msgStmt, err := tx.Prepare("INSERT INTO messages (conversation_id, timestamp, sender, sender_number, content) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		log.Printf("Failed to prepare message statement: %v", err)
+		return
+	}
+	defer msgStmt.Close()
+
+	imgStmt, err := tx.Prepare("INSERT INTO images (message_id, image_url) VALUES (?, ?)")
+	if err != nil {
+		log.Printf("Failed to prepare image statement: %v", err)
+		return
+	}
+	defer imgStmt.Close()
+
+	for _, msg := range conv.Messages {
+		msgResult, err := msgStmt.Exec(convID, msg.Timestamp, msg.Sender, msg.SenderNumber, msg.Content)
 		if err != nil {
-			lgr.Error("error marshaling JSON file", "err", err)
-			continue
+			log.Printf("Failed to insert message: %v", err)
+			return
 		}
 
-		fmt.Println(string(jsonData))
+		msgID, err := msgResult.LastInsertId()
+		if err != nil {
+			log.Printf("Failed to get last insert ID for message: %v", err)
+			return
+		}
+
+		for _, img := range msg.Images {
+			if _, err := imgStmt.Exec(msgID, img); err != nil {
+				log.Printf("Failed to insert image: %v", err)
+				return
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit transaction: %v", err)
 	}
 }
 
@@ -78,19 +250,43 @@ func parseFile(lgr *slog.Logger, r io.Reader) (Conversation, error) {
 		return Conversation{}, err
 	}
 
-	var conversation Conversation
+	conversation := Conversation{
+		Participants: make(map[string]string),
+	}
 	var f func(*html.Node)
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			switch n.Data {
+			case "title":
+				title := extractTitle(n)
+				title = strings.ReplaceAll(title, "\n", " ")
+				parts := strings.Split(title, " to ")
+
+				// Add participants from the title if they're not already in the map
+				if len(parts) == 2 {
+					sender := strings.TrimSpace(parts[0])
+					recipient := strings.TrimSpace(parts[1])
+					if _, exists := conversation.Participants[sender]; !exists {
+						conversation.Participants[sender] = ""
+					}
+					if _, exists := conversation.Participants[recipient]; !exists {
+						conversation.Participants[recipient] = ""
+					}
+				}
+
 			case "div":
 				for _, a := range n.Attr {
 					if a.Key == "class" {
 						switch a.Val {
 						case "hChatLog hfeed":
 							conversation.Type = "chat"
-							conversation.Participants = parseParticipants(lgr, n)
+							for k, v := range parseParticipants(lgr, n) {
+								conversation.Participants[k] = v
+							}
 							conversation.Messages = parseMessages(lgr, n)
+							if len(conversation.Messages) > 0 {
+								conversation.Timestamp = conversation.Messages[0].Timestamp
+							}
 						case "haudio":
 							conversation = parseCallOrVoicemail(lgr, n)
 						}
@@ -200,6 +396,22 @@ func extractPhoneNumber(n *html.Node) string {
 		}
 	}
 	return ""
+}
+
+func extractTitle(n *html.Node) string {
+	var title string
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "title" {
+			title = extractText(n)
+			return
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(n)
+	return title
 }
 
 func parseMessages(lgr *slog.Logger, n *html.Node) []Message {

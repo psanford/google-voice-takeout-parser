@@ -288,3 +288,108 @@ func TestParseMissedCall(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSMS2(t *testing.T) {
+	input, err := os.ReadFile("testdata/sms2.html")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	conv, err := parseHTML(string(input))
+	if err != nil {
+		t.Fatalf("Failed to parse HTML: %v", err)
+	}
+
+	expected := Conversation{
+		Type:      "chat",
+		Timestamp: time.Date(2023, 8, 21, 17, 52, 44, 104000000, time.FixedZone("PDT", -7*60*60)),
+		Participants: map[string]string{
+			"Me":             "+2222",
+			"Sillio Sanford": "",
+		},
+		Messages: []Message{
+			{
+				Timestamp:    time.Date(2023, 8, 21, 17, 52, 44, 104000000, time.FixedZone("PDT", -7*60*60)),
+				Sender:       "Me",
+				SenderNumber: "+2222",
+				Content:      "Hey ya",
+			},
+			{
+				Timestamp:    time.Date(2023, 8, 21, 18, 2, 19, 924000000, time.FixedZone("PDT", -7*60*60)),
+				Sender:       "Me",
+				SenderNumber: "+2222",
+				Content:      "How are you?",
+			},
+			{
+				Timestamp:    time.Date(2023, 8, 21, 18, 2, 49, 957000000, time.FixedZone("PDT", -7*60*60)),
+				Sender:       "Me",
+				SenderNumber: "+2222",
+				Content:      "Apple",
+				Images:       []string{"Sillio Sanford - Text - 2023-08-22T00_52_44Z-3-1"},
+			},
+			{
+				Timestamp:    time.Date(2023, 8, 21, 18, 7, 34, 456000000, time.FixedZone("PDT", -7*60*60)),
+				Sender:       "Me",
+				SenderNumber: "+2222",
+				Content:      "Just text",
+			},
+			{
+				Timestamp:    time.Date(2023, 8, 21, 18, 8, 9, 840000000, time.FixedZone("PDT", -7*60*60)),
+				Sender:       "Me",
+				SenderNumber: "+2222",
+				Content:      "MMS Sent",
+				Images:       []string{"Sillio Sanford - Text - 2023-08-22T00_52_44Z-5-1"},
+			},
+			{
+				Timestamp:    time.Date(2023, 8, 21, 21, 12, 17, 519000000, time.FixedZone("PDT", -7*60*60)),
+				Sender:       "Me",
+				SenderNumber: "+2222",
+				Content:      "Hey",
+			},
+		},
+	}
+
+	if conv.Type != expected.Type {
+		t.Errorf("Expected type %s, got %s", expected.Type, conv.Type)
+	}
+	if !conv.Timestamp.Equal(expected.Timestamp) {
+		t.Errorf("Expected type %s, got %s", expected.Timestamp, conv.Timestamp)
+	}
+
+	if len(conv.Participants) != len(expected.Participants) {
+		t.Errorf("Expected %d participants, got %d", len(expected.Participants), len(conv.Participants))
+	} else {
+		for name, number := range expected.Participants {
+			if conv.Participants[name] != number {
+				t.Errorf("Expected participant %s with number %s, got %s", name, number, conv.Participants[name])
+			}
+		}
+	}
+	if len(conv.Messages) != len(expected.Messages) {
+		t.Errorf("Expected %d messages, got %d", len(expected.Messages), len(conv.Messages))
+	} else {
+		for i, m := range expected.Messages {
+			if !conv.Messages[i].Timestamp.Equal(m.Timestamp) {
+				t.Errorf("Message %d: Expected timestamp %v, got %v", i, m.Timestamp, conv.Messages[i].Timestamp)
+			}
+			if conv.Messages[i].Sender != m.Sender {
+				t.Errorf("Message %d: Expected sender %s, got %s", i, m.Sender, conv.Messages[i].Sender)
+			}
+			if conv.Messages[i].SenderNumber != m.SenderNumber {
+				t.Errorf("Message %d: Expected sender number %s, got %s", i, m.SenderNumber, conv.Messages[i].SenderNumber)
+			}
+			if conv.Messages[i].Content != m.Content {
+				t.Errorf("Message %d: Expected content %s, got %s", i, m.Content, conv.Messages[i].Content)
+			}
+			if len(conv.Messages[i].Images) != len(m.Images) {
+				t.Errorf("Message %d: Expected %d images, got %d", i, len(m.Images), len(conv.Messages[i].Images))
+			} else {
+				for j, img := range m.Images {
+					if conv.Messages[i].Images[j] != img {
+						t.Errorf("Message %d: Expected image %s, got %s", i, img, conv.Messages[i].Images[j])
+					}
+				}
+			}
+		}
+	}
+}
