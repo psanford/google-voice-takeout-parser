@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Conversation Detail - Google Voice Takeout Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .message-list {
+            list-style-type: none;
+            padding: 0;
+        }
+        .message-item {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 3px;
+        }
+        .message-sender {
+            font-weight: bold;
+            color: #555;
+        }
+        .message-timestamp {
+            color: #888;
+            font-size: 0.9em;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            text-decoration: none;
+            border-radius: 3px;
+        }
+        .message-image {
+            max-width: 100%;
+            height: auto;
+            margin-top: 10px;
+        }
+        .participants {
+            font-style: italic;
+            color: #666;
+            margin-bottom: 15px;
+        }
+        .transcript {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 3px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Conversation Detail</h1>
+        <h2>{{.Conversation.Type}} - {{.Conversation.Timestamp.Format "Jan 02, 2006 15:04:05"}}</h2>
+        <div class="participants">
+            Participants:
+            {{range $index, $participant := .Conversation.Participants}}
+                {{if $index}}, {{end}}
+                {{if $participant.Name}}{{$participant.Name}}{{else}}{{$participant.PhoneNumber}}{{end}}
+            {{end}}
+        </div>
+        <div class="transcript">
+            <h3>Transcript:</h3>
+            <pre>{{.Conversation.Transcript}}</pre>
+        </div>
+        <h3>Messages:</h3>
+        <ul class="message-list">
+            {{range .Messages}}
+            <li class="message-item">
+                <span class="message-sender">{{.Sender}}</span>
+                <span class="message-timestamp">{{.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
+                <p>{{.Content}}</p>
+                {{if .ImageURL}}
+                <img src="{{.ImageURL}}" alt="Message Image" class="message-image">
+                {{end}}
+            </li>
+            {{else}}
+            <li>No messages found for this conversation.</li>
+            {{end}}
+        </ul>
+        <a href="/" class="back-link">Back to Conversations</a>
+    </div>
+</body>
+</html>

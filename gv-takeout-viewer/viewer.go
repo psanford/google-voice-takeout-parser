@@ -20,247 +20,7 @@ var addr = flag.String("addr", ":8080", "HTTP server address")
 var db *sql.DB
 var templates *template.Template
 
-const indexTemplate = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Google Voice Takeout Viewer</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f4f4f4;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: #fff;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-        }
-        .conversation-list {
-            list-style-type: none;
-            padding: 0;
-        }
-        .conversation-item {
-            background-color: #f9f9f9;
-            border: 1px solid #ddd;
-            margin-bottom: 10px;
-            padding: 10px;
-            border-radius: 3px;
-        }
-        .conversation-type {
-            font-weight: bold;
-            color: #555;
-        }
-        .conversation-timestamp {
-            color: #888;
-            font-size: 0.9em;
-        }
-        .pagination {
-            margin-top: 20px;
-            text-align: center;
-        }
-        .pagination a {
-            display: inline-block;
-            padding: 8px 16px;
-            text-decoration: none;
-            color: #333;
-            background-color: #f1f1f1;
-            border: 1px solid #ddd;
-            margin: 0 4px;
-        }
-        .pagination a:hover {
-            background-color: #ddd;
-        }
-        .pagination .active {
-            background-color: #4CAF50;
-            color: white;
-            border: 1px solid #4CAF50;
-        }
-        .search-form {
-            margin-bottom: 20px;
-        }
-        .search-form input[type="text"] {
-            padding: 8px;
-            width: 70%;
-        }
-        .search-form input[type="submit"] {
-            padding: 8px 16px;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            cursor: pointer;
-        }
-        .participants {
-            font-style: italic;
-            color: #666;
-            margin-top: 5px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Google Voice Takeout Viewer</h1>
-        <p>Welcome to the Google Voice Takeout Viewer. This application allows you to browse and search your Google Voice conversations.</p>
-        <form class="search-form" action="/" method="GET">
-            <input type="text" name="search" placeholder="Search conversations..." value="{{.SearchTerm}}">
-            <input type="submit" value="Search">
-        </form>
-        <h2>Conversations</h2>
-        <ul class="conversation-list">
-            {{range .Conversations}}
-            <li class="conversation-item">
-                <span class="conversation-type">{{.Type}}</span>
-                <span class="conversation-timestamp">{{.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
-                <div class="participants">
-                    Participants:
-                    {{range $index, $participant := .Participants}}
-                        {{if $index}}, {{end}}
-                        {{if $participant.Name}}{{$participant.Name}}{{else}}{{$participant.PhoneNumber}}{{end}}
-                    {{end}}
-                </div>
-                <p>{{if .Transcript}}{{.Transcript}}{{else}}No transcript available{{end}}</p>
-                <a href="/conversation/{{.ID}}">View Details</a>
-            </li>
-            {{else}}
-            <li>No conversations found.</li>
-            {{end}}
-        </ul>
-        <div class="pagination">
-            {{if gt .CurrentPage 1}}
-                <a href="/?page={{.PrevPage}}&search={{.SearchTerm}}">&laquo; Previous</a>
-            {{end}}
-            {{range .Pages}}
-                {{if eq . $.CurrentPage}}
-                    <a href="/?page={{.}}&search={{$.SearchTerm}}" class="active">{{.}}</a>
-                {{else}}
-                    <a href="/?page={{.}}&search={{$.SearchTerm}}">{{.}}</a>
-                {{end}}
-            {{end}}
-            {{if lt .CurrentPage .TotalPages}}
-                <a href="/?page={{.NextPage}}&search={{.SearchTerm}}">Next &raquo;</a>
-            {{end}}
-        </div>
-    </div>
-</body>
-</html>
-`
-
 const conversationDetailTemplate = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Conversation Detail - Google Voice Takeout Viewer</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f4f4f4;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: #fff;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-        h1, h2 {
-            color: #333;
-        }
-        .message-list {
-            list-style-type: none;
-            padding: 0;
-        }
-        .message-item {
-            background-color: #f9f9f9;
-            border: 1px solid #ddd;
-            margin-bottom: 10px;
-            padding: 10px;
-            border-radius: 3px;
-        }
-        .message-sender {
-            font-weight: bold;
-            color: #555;
-        }
-        .message-timestamp {
-            color: #888;
-            font-size: 0.9em;
-        }
-        .back-link {
-            display: inline-block;
-            margin-top: 20px;
-            padding: 8px 16px;
-            background-color: #4CAF50;
-            color: white;
-            text-decoration: none;
-            border-radius: 3px;
-        }
-        .message-image {
-            max-width: 100%;
-            height: auto;
-            margin-top: 10px;
-        }
-        .participants {
-            font-style: italic;
-            color: #666;
-            margin-bottom: 15px;
-        }
-        .transcript {
-            background-color: #f0f0f0;
-            padding: 10px;
-            border-radius: 3px;
-            margin-bottom: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Conversation Detail</h1>
-        <h2>{{.Conversation.Type}} - {{.Conversation.Timestamp.Format "Jan 02, 2006 15:04:05"}}</h2>
-        <div class="participants">
-            Participants:
-            {{range $index, $participant := .Conversation.Participants}}
-                {{if $index}}, {{end}}
-                {{if $participant.Name}}{{$participant.Name}}{{else}}{{$participant.PhoneNumber}}{{end}}
-            {{end}}
-        </div>
-        <div class="transcript">
-            <h3>Transcript:</h3>
-            <pre>{{.Conversation.Transcript}}</pre>
-        </div>
-        <h3>Messages:</h3>
-        <ul class="message-list">
-            {{range .Messages}}
-            <li class="message-item">
-                <span class="message-sender">{{.Sender}}</span>
-                <span class="message-timestamp">{{.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
-                <p>{{.Content}}</p>
-                {{if .ImageURL}}
-                <img src="{{.ImageURL}}" alt="Message Image" class="message-image">
-                {{end}}
-            </li>
-            {{else}}
-            <li>No messages found for this conversation.</li>
-            {{end}}
-        </ul>
-        <a href="/" class="back-link">Back to Conversations</a>
-    </div>
-</body>
-</html>
 `
 
 type Conversation struct {
@@ -300,8 +60,11 @@ func main() {
 		log.Fatalf("PRAGMA journal_mode=WAL error: %s", err)
 	}
 
-	templates = template.Must(template.New("index").Parse(indexTemplate))
-	template.Must(templates.New("conversation").Parse(conversationDetailTemplate))
+	templates = template.New("")
+	_, err = templates.ParseGlob("templates/*.html")
+	if err != nil {
+		log.Fatalf("parse templates err: %s", err)
+	}
 
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/conversation/", conversationDetailHandler)
@@ -361,7 +124,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		SearchTerm:    searchTerm,
 	}
 
-	if err := templates.ExecuteTemplate(w, "index", data); err != nil {
+	if err := templates.ExecuteTemplate(w, "index.html", data); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -408,7 +171,7 @@ func conversationDetailHandler(w http.ResponseWriter, r *http.Request) {
 		Messages:     messages,
 	}
 
-	if err := templates.ExecuteTemplate(w, "conversation", data); err != nil {
+	if err := templates.ExecuteTemplate(w, "conversation.html", data); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -548,39 +311,6 @@ func getMessagesByConversationID(conversationID int) ([]Message, error) {
 
 	return messages, nil
 }
-
-// Schema
-// conversation.type can be missed_call received_call voicemail chat placed_call
-// `CREATE TABLE IF NOT EXISTS conversations (
-// 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-// 	type TEXT,
-// 	timestamp DATETIME,
-// 	duration TEXT,
-// 	transcript TEXT,
-// 	source_file TEXT
-// )`,
-// `CREATE TABLE IF NOT EXISTS participants (
-// 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-// 	conversation_id INTEGER,
-// 	name TEXT,
-// 	phone_number TEXT,
-// 	FOREIGN KEY (conversation_id) REFERENCES conversations (id)
-// )`,
-// `CREATE TABLE IF NOT EXISTS messages (
-// 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-// 	conversation_id INTEGER,
-// 	timestamp DATETIME,
-// 	sender TEXT,
-// 	sender_number TEXT,
-// 	content TEXT,
-// 	FOREIGN KEY (conversation_id) REFERENCES conversations (id)
-// )`,
-// `CREATE TABLE IF NOT EXISTS images (
-// 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-// 	message_id INTEGER,
-// 	image_url TEXT,
-// 	FOREIGN KEY (message_id) REFERENCES messages (id)
-// )`,
 
 func getTranscript(conversationID int, conversationType string) (string, error) {
 	if conversationType == "voicemail" {
