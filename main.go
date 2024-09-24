@@ -35,8 +35,11 @@ type Message struct {
 	Images       []string  `json:"images,omitempty"`
 }
 
+var (
+	format = flag.String("format", "json", "Output format: json or sqlite")
+)
+
 func main() {
-	format := flag.String("format", "json", "Output format: json or sqlite")
 	flag.Parse()
 
 	if *format != "json" && *format != "sqlite" {
@@ -70,7 +73,7 @@ func main() {
 			continue
 		}
 
-		conversation, err := parseFile(lgr, f)
+		conversation, err := parseFile(lgr, f, file)
 		if err != nil {
 			lgr.Error("error parsing file", "err", err)
 			f.Close()
@@ -151,6 +154,13 @@ func createTables(db *sql.DB) {
 			image_url TEXT,
 			FOREIGN KEY (message_id) REFERENCES messages (id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS media_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			image_id INTEGER,
+			file_name TEXT,
+			content BLOB,
+			FOREIGN KEY (image_id) REFERENCES images (id)
+		)`,
 	}
 
 	for _, query := range createTableQueries {
@@ -218,6 +228,13 @@ func insertConversation(db *sql.DB, conv Conversation) {
 	}
 	defer imgStmt.Close()
 
+	mediaStmt, err := tx.Prepare("INSERT INTO media_files (image_id, file_name, content) VALUES (?, ?, ?)")
+	if err != nil {
+		log.Printf("Failed to prepare media file statement: %v", err)
+		return
+	}
+	defer mediaStmt.Close()
+
 	for _, msg := range conv.Messages {
 		msgResult, err := msgStmt.Exec(convID, msg.Timestamp, msg.Sender, msg.SenderNumber, msg.Content)
 		if err != nil {
@@ -232,8 +249,20 @@ func insertConversation(db *sql.DB, conv Conversation) {
 		}
 
 		for _, img := range msg.Images {
-			if _, err := imgStmt.Exec(msgID, img); err != nil {
+			imgResult, err := imgStmt.Exec(msgID, img)
+			if err != nil {
 				log.Printf("Failed to insert image: %v", err)
+				return
+			}
+
+			imgID, err := imgResult.LastInsertId()
+			if err != nil {
+				log.Printf("Failed to get last insert ID for image: %v", err)
+				return
+			}
+
+			if err := insertMediaFile(tx, mediaStmt, imgID, img); err != nil {
+				log.Printf("Failed to insert media file: %v", err)
 				return
 			}
 		}
@@ -244,7 +273,27 @@ func insertConversation(db *sql.DB, conv Conversation) {
 	}
 }
 
-func parseFile(lgr *slog.Logger, r io.Reader) (Conversation, error) {
+func insertMediaFile(tx *sql.Tx, stmt *sql.Stmt, imgID int64, imageURL string) error {
+	fullPath, err := findMediaFile(imageURL)
+	if err != nil {
+		return fmt.Errorf("failed to find media file for %s: %s", imageURL, err)
+	}
+
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		log.Printf("Failed to read img file %s", fullPath)
+		return fmt.Errorf("failed to read media file: %v", err)
+	}
+
+	_, err = stmt.Exec(imgID, fullPath, content)
+	if err != nil {
+		return fmt.Errorf("failed to insert media file: %v", err)
+	}
+
+	return nil
+}
+
+func parseFile(lgr *slog.Logger, r io.Reader, filename string) (Conversation, error) {
 	doc, err := html.Parse(r)
 	if err != nil {
 		return Conversation{}, err
@@ -546,4 +595,47 @@ func extractText(n *html.Node) string {
 	}
 	f(n)
 	return strings.TrimSpace(text)
+}
+
+func findMediaFile(relativePath string) (string, error) {
+	parts := strings.Split(relativePath, " ")
+	last := parts[len(parts)-1]
+
+	look := func(glob string) (string, error) {
+		matches, err := filepath.Glob("*" + glob + "*")
+		if err != nil {
+			return "", err
+		}
+		for _, match := range matches {
+			if strings.HasSuffix(match, ".html") {
+				continue
+			}
+			return match, nil
+		}
+		return "", nil
+	}
+
+	match, err := look(last)
+	if err != nil {
+		return "", err
+	}
+	if match != "" {
+		return match, nil
+	}
+
+	lastParts := strings.Split(last, "-")
+	if len(lastParts) > 2 {
+		lastParts = lastParts[:len(lastParts)-1]
+		last = strings.Join(lastParts, "-")
+
+		match, err := look(last)
+		if err != nil {
+			return "", err
+		}
+		if match != "" {
+			return match, nil
+		}
+	}
+
+	return "", fmt.Errorf("no matching media file found for %s", relativePath)
 }
