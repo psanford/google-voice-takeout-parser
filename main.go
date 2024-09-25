@@ -25,7 +25,6 @@ type Conversation struct {
 	Messages     []Message         `json:"messages,omitempty"`
 	Transcript   string            `json:"transcript,omitempty"`
 	SourceFile   string            `json:"source_file"`
-	SenderInfo   map[string]string `json:"-"`
 }
 
 type Message struct {
@@ -222,7 +221,7 @@ func insertConversation(db *sql.DB, conv Conversation) {
 
 	contactIDs := make(map[string]int64)
 
-	for name, number := range conv.SenderInfo {
+	for name, number := range conv.Participants {
 		_, err := contactStmt.Exec(name, number)
 		if err != nil {
 			log.Printf("Failed to insert contact: %v", err)
@@ -339,7 +338,6 @@ func parseFile(lgr *slog.Logger, r io.Reader, filename string) (Conversation, er
 
 	conversation := Conversation{
 		Participants: make(map[string]string),
-		SenderInfo:   make(map[string]string),
 	}
 	var f func(*html.Node)
 	f = func(n *html.Node) {
@@ -371,7 +369,7 @@ func parseFile(lgr *slog.Logger, r io.Reader, filename string) (Conversation, er
 							for k, v := range parseParticipants(lgr, n) {
 								conversation.Participants[k] = v
 							}
-							conversation.Messages, conversation.SenderInfo = parseMessages(lgr, n)
+							conversation.Messages = parseMessages(lgr, n)
 							if len(conversation.Messages) > 0 {
 								conversation.Timestamp = conversation.Messages[0].Timestamp
 							}
@@ -502,17 +500,15 @@ func extractTitle(n *html.Node) string {
 	return title
 }
 
-func parseMessages(lgr *slog.Logger, n *html.Node) ([]Message, map[string]string) {
+func parseMessages(lgr *slog.Logger, n *html.Node) []Message {
 	var messages []Message
-	senderInfo := make(map[string]string)
 	var f func(*html.Node)
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "div" {
 			for _, a := range n.Attr {
 				if a.Key == "class" && a.Val == "message" {
-					msg, senderName, senderNumber := parseMessage(n)
+					msg := parseMessage(n)
 					messages = append(messages, msg)
-					senderInfo[senderName] = senderNumber
 				}
 			}
 		}
@@ -521,10 +517,10 @@ func parseMessages(lgr *slog.Logger, n *html.Node) ([]Message, map[string]string
 		}
 	}
 	f(n)
-	return messages, senderInfo
+	return messages
 }
 
-func parseMessage(n *html.Node) (Message, string, string) {
+func parseMessage(n *html.Node) Message {
 	var msg Message
 	var senderName, senderNumber string
 	var f func(*html.Node)
@@ -556,7 +552,7 @@ func parseMessage(n *html.Node) (Message, string, string) {
 	f(n)
 	msg.Sender = senderName
 	msg.SenderNumber = senderNumber
-	return msg, senderName, senderNumber
+	return msg
 }
 
 func parseSenderAndNumber(n *html.Node) (string, string) {
