@@ -125,13 +125,13 @@ func outputSQLite(db *sql.DB, conv Conversation) {
 
 func createTables(db *sql.DB) {
 	createTableQueries := []string{
-		`CREATE TABLE IF NOT EXISTS contacts (
+		`CREATE TABLE IF NOT EXISTS contact (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT,
 			phone_number TEXT,
 			UNIQUE(name, phone_number)
 		)`,
-		`CREATE TABLE IF NOT EXISTS conversations (
+		`CREATE TABLE IF NOT EXISTS conversation (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			type TEXT,
 			timestamp DATETIME,
@@ -139,34 +139,34 @@ func createTables(db *sql.DB) {
 			transcript TEXT,
 			source_file TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS participants (
+		`CREATE TABLE IF NOT EXISTS participant (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			conversation_id INTEGER,
 			contact_id INTEGER,
-			FOREIGN KEY (conversation_id) REFERENCES conversations (id),
-			FOREIGN KEY (contact_id) REFERENCES contacts (id)
+			FOREIGN KEY (conversation_id) REFERENCES conversation (id),
+			FOREIGN KEY (contact_id) REFERENCES contact (id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS messages (
+		`CREATE TABLE IF NOT EXISTS message (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			conversation_id INTEGER,
 			timestamp DATETIME,
 			sender_contact_id INTEGER,
 			content TEXT,
-			FOREIGN KEY (conversation_id) REFERENCES conversations (id),
-			FOREIGN KEY (sender_contact_id) REFERENCES contacts (id)
+			FOREIGN KEY (conversation_id) REFERENCES conversation (id),
+			FOREIGN KEY (sender_contact_id) REFERENCES contact (id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS images (
+		`CREATE TABLE IF NOT EXISTS image (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			message_id INTEGER,
 			image_url TEXT,
-			FOREIGN KEY (message_id) REFERENCES messages (id)
+			FOREIGN KEY (message_id) REFERENCES message (id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS media_files (
+		`CREATE TABLE IF NOT EXISTS media_file (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			image_id INTEGER,
 			file_name TEXT,
 			content BLOB,
-			FOREIGN KEY (image_id) REFERENCES images (id)
+			FOREIGN KEY (image_id) REFERENCES image (id)
 		)`,
 	}
 
@@ -186,7 +186,7 @@ func insertConversation(db *sql.DB, conv Conversation) {
 	defer tx.Rollback()
 
 	// Insert conversation
-	convStmt, err := tx.Prepare("INSERT INTO conversations (type, timestamp, duration, transcript, source_file) VALUES (?, ?, ?, ?, ?)")
+	convStmt, err := tx.Prepare("INSERT INTO conversation (type, timestamp, duration, transcript, source_file) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare conversation statement: %v", err)
 		return
@@ -206,14 +206,14 @@ func insertConversation(db *sql.DB, conv Conversation) {
 	}
 
 	// Insert contacts and participants
-	contactStmt, err := tx.Prepare("INSERT OR IGNORE INTO contacts (name, phone_number) VALUES (?, ?)")
+	contactStmt, err := tx.Prepare("INSERT OR IGNORE INTO contact (name, phone_number) VALUES (?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare contact statement: %v", err)
 		return
 	}
 	defer contactStmt.Close()
 
-	partStmt, err := tx.Prepare("INSERT INTO participants (conversation_id, contact_id) VALUES (?, ?)")
+	partStmt, err := tx.Prepare("INSERT INTO participant (conversation_id, contact_id) VALUES (?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare participant statement: %v", err)
 		return
@@ -230,7 +230,7 @@ func insertConversation(db *sql.DB, conv Conversation) {
 		}
 
 		var contactID int64
-		err = tx.QueryRow("SELECT id FROM contacts WHERE name = ? AND phone_number = ?", name, number).Scan(&contactID)
+		err = tx.QueryRow("SELECT id FROM contact WHERE name = ? AND phone_number = ?", name, number).Scan(&contactID)
 		if err != nil {
 			log.Printf("Failed to get contact ID: %v", err)
 			return
@@ -246,21 +246,21 @@ func insertConversation(db *sql.DB, conv Conversation) {
 	}
 
 	// Insert messages and images
-	msgStmt, err := tx.Prepare("INSERT INTO messages (conversation_id, timestamp, sender_contact_id, content) VALUES (?, ?, ?, ?)")
+	msgStmt, err := tx.Prepare("INSERT INTO message (conversation_id, timestamp, sender_contact_id, content) VALUES (?, ?, ?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare message statement: %v", err)
 		return
 	}
 	defer msgStmt.Close()
 
-	imgStmt, err := tx.Prepare("INSERT INTO images (message_id, image_url) VALUES (?, ?)")
+	imgStmt, err := tx.Prepare("INSERT INTO image (message_id, image_url) VALUES (?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare image statement: %v", err)
 		return
 	}
 	defer imgStmt.Close()
 
-	mediaStmt, err := tx.Prepare("INSERT INTO media_files (image_id, file_name, content) VALUES (?, ?, ?)")
+	mediaStmt, err := tx.Prepare("INSERT INTO media_file (image_id, file_name, content) VALUES (?, ?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare media file statement: %v", err)
 		return
