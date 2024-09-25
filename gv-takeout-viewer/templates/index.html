@@ -102,7 +102,7 @@
             Participants:
             {{range $index, $participant := .Participants}}
             {{if $index}}, {{end}}
-            {{if $participant.Name}}{{$participant.Name}}{{else}}{{$participant.PhoneNumber}}{{end}}
+            {{$participant.Name}}
             {{end}}
           </div>
           <p>{{if .Transcript}}{{.Transcript}}{{else}}No transcript available{{end}}</p>

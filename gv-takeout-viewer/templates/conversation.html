@@ -38,6 +38,11 @@
             font-weight: bold;
             color: #555;
         }
+        .message-sender-number {
+            color: #888;
+            font-size: 0.9em;
+        }
+
         .message-timestamp {
             color: #888;
             font-size: 0.9em;
@@ -77,7 +82,7 @@
             Participants:
             {{range $index, $participant := .Conversation.Participants}}
                 {{if $index}}, {{end}}
-                {{if $participant.Name}}{{$participant.Name}}{{else}}{{$participant.PhoneNumber}}{{end}}
+                {{$participant.Name}}
             {{end}}
         </div>
         <div class="transcript">
@@ -88,8 +93,9 @@
         <ul class="message-list">
             {{range .Messages}}
             <li class="message-item">
-                <span class="message-sender">{{.Sender}}</span>
-                <span class="message-timestamp">{{.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
+              <span class="message-sender">{{.SenderName}}</span>
+              <span class="message-sender-number">{{.SenderNumber}}</span>
+              <span class="message-timestamp">{{.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
                 <p>{{.Content}}</p>
                 {{if .ImageURL}}
                 <img src="{{.ImageURL}}" alt="Message Image" class="message-image">

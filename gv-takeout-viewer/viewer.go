@@ -33,16 +33,20 @@ type Conversation struct {
 }
 
 type Participant struct {
+	ID          int
+	ContactID   int
 	Name        string
 	PhoneNumber string
 }
 
 type Message struct {
-	ID        int
-	Timestamp time.Time
-	Sender    string
-	Content   string
-	ImageURL  *string
+	ID              int
+	Timestamp       time.Time
+	SenderContactID int
+	SenderName      string
+	SenderNumber    string
+	Content         string
+	ImageURL        *string
 }
 
 func main() {
@@ -178,20 +182,18 @@ func conversationDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 func getConversations(limit, offset int, searchTerm string) ([]Conversation, error) {
 	query := `
-		SELECT c.id, c.type, c.timestamp, c.duration
-		FROM conversations c
-		WHERE c.transcript LIKE ? OR c.id IN (
-			SELECT DISTINCT conversation_id
-			FROM messages
-			WHERE content LIKE ?
-		)
+		SELECT DISTINCT c.id, c.type, c.timestamp, c.duration
+		FROM conversation c
+		LEFT JOIN message m ON c.id = m.conversation_id
+		LEFT JOIN contact ct ON m.sender_contact_id = ct.id
+		WHERE c.transcript LIKE ? OR m.content LIKE ? OR ct.name LIKE ?
 		ORDER BY c.timestamp DESC
 		LIMIT ? OFFSET ?
 	`
 	searchPattern := "%" + searchTerm + "%"
-	rows, err := db.Query(query, searchPattern, searchPattern, limit, offset)
+	rows, err := db.Query(query, searchPattern, searchPattern, searchPattern, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query conversations: %v", err)
+		return nil, fmt.Errorf("failed to query conversation: %v", err)
 	}
 	defer rows.Close()
 
@@ -229,20 +231,21 @@ func getConversations(limit, offset int, searchTerm string) ([]Conversation, err
 
 func getParticipants(conversationID int) ([]Participant, error) {
 	query := `
-		SELECT name, phone_number
-		FROM participants
-		WHERE conversation_id = ?
+		SELECT p.id, p.contact_id, c.name, c.phone_number
+		FROM participant p
+		JOIN contact c ON p.contact_id = c.id
+		WHERE p.conversation_id = ?
 	`
 	rows, err := db.Query(query, conversationID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query participants: %v", err)
+		return nil, fmt.Errorf("failed to query participant: %v", err)
 	}
 	defer rows.Close()
 
 	var participants []Participant
 	for rows.Next() {
 		var p Participant
-		err := rows.Scan(&p.Name, &p.PhoneNumber)
+		err := rows.Scan(&p.ID, &p.ContactID, &p.Name, &p.PhoneNumber)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan participant row: %v", err)
 		}
@@ -257,7 +260,7 @@ func getParticipants(conversationID int) ([]Participant, error) {
 }
 
 func getTotalConversationCount(searchTerm string) (int, error) {
-	query := "SELECT COUNT(*) FROM conversations WHERE transcript LIKE ?"
+	query := "SELECT COUNT(*) FROM conversation WHERE transcript LIKE ?"
 	searchPattern := "%" + searchTerm + "%"
 	var count int
 	err := db.QueryRow(query, searchPattern).Scan(&count)
@@ -270,7 +273,7 @@ func getTotalConversationCount(searchTerm string) (int, error) {
 func getConversationByID(id int) (Conversation, error) {
 	query := `
 		SELECT id, type, timestamp, duration, transcript
-		FROM conversations
+		FROM conversation
 		WHERE id = ?
 	`
 	var c Conversation
@@ -283,9 +286,10 @@ func getConversationByID(id int) (Conversation, error) {
 
 func getMessagesByConversationID(conversationID int) ([]Message, error) {
 	query := `
-		SELECT m.id, m.timestamp, m.sender, m.content, i.image_url
-		FROM messages m
-		LEFT JOIN images i ON m.id = i.message_id
+		SELECT m.id, m.timestamp, m.sender_contact_id, c.name, c.phone_number, m.content, i.image_url
+		FROM message m
+		LEFT JOIN image i ON m.id = i.message_id
+		LEFT JOIN contact c ON m.sender_contact_id = c.id
 		WHERE m.conversation_id = ?
 		ORDER BY m.timestamp ASC
 	`
@@ -298,7 +302,7 @@ func getMessagesByConversationID(conversationID int) ([]Message, error) {
 	var messages []Message
 	for rows.Next() {
 		var m Message
-		err := rows.Scan(&m.ID, &m.Timestamp, &m.Sender, &m.Content, &m.ImageURL)
+		err := rows.Scan(&m.ID, &m.Timestamp, &m.SenderContactID, &m.SenderName, &m.SenderNumber, &m.Content, &m.ImageURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan message row: %v", err)
 		}
@@ -314,9 +318,9 @@ func getMessagesByConversationID(conversationID int) ([]Message, error) {
 
 func getTranscript(conversationID int, conversationType string) (string, error) {
 	if conversationType == "voicemail" {
-		// For voicemail, we already have the transcript in the conversations table
+		// For voicemail, we already have the transcript in the conversation table
 		var transcript string
-		err := db.QueryRow("SELECT transcript FROM conversations WHERE id = ?", conversationID).Scan(&transcript)
+		err := db.QueryRow("SELECT transcript FROM conversation WHERE id = ?", conversationID).Scan(&transcript)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch voicemail transcript: %v", err)
 		}
@@ -325,26 +329,27 @@ func getTranscript(conversationID int, conversationType string) (string, error) 
 
 	// For chat messages, build the transcript from the messages table
 	query := `
-		SELECT sender, content
-		FROM messages
-		WHERE conversation_id = ?
-		ORDER BY timestamp ASC
+		SELECT c.name, m.content
+		FROM message m
+		JOIN contact c ON m.sender_contact_id = c.id
+		WHERE m.conversation_id = ?
+		ORDER BY m.timestamp ASC
 		LIMIT 5
 	`
 	rows, err := db.Query(query, conversationID)
 	if err != nil {
-		return "", fmt.Errorf("failed to query messages for transcript: %v", err)
+		return "", fmt.Errorf("failed to query message for transcript: %v", err)
 	}
 	defer rows.Close()
 
 	var transcript strings.Builder
 	for rows.Next() {
-		var sender, content string
-		err := rows.Scan(&sender, &content)
+		var senderName, content string
+		err := rows.Scan(&senderName, &content)
 		if err != nil {
 			return "", fmt.Errorf("failed to scan message row: %v", err)
 		}
-		transcript.WriteString(fmt.Sprintf("%s: %s\n", sender, content))
+		transcript.WriteString(fmt.Sprintf("%s: %s\n", senderName, content))
 	}
 
 	if err := rows.Err(); err != nil {
