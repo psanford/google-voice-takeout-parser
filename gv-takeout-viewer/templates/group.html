@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Google Voice Takeout Viewer</title>
+    <title>Groups - Google Voice Takeout Viewer</title>
     <style>
      body {
          font-family: Arial, sans-serif;
@@ -76,22 +76,17 @@
   </head>
   <body>
     <div class="container">
-      <h1>Groups</h1>
+      <h1>Group</h1>
       <ul class="conversation-list">
-        {{range .Groups}}
         <li class="conversation-item">
-          <span class="conversation-type">{{.Type}}</span>
-          <span class="conversation-type">{{.LastConversationID}}</span>
-          <span class="conversation-timestamp">{{.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
+          <span class="conversation-timestamp">{{.Group.Timestamp.Format "Jan 02, 2006 15:04:05"}}</span>
           <div class="participants">
-            Participants:
-            {{range $index, $participant := .Participants}}
-            {{if $index}}, {{end}}
-            {{$participant.Name}}
+            {{range $index, $participant := .Group.Participants}}
+            {{$participant.Name}}<br>
             {{end}}
           </div>
           <ul class="message-list">
-            {{range .RecentMessages}}
+            {{range .Messages}}
             <li class="message-item">
               <span class="message-sender">{{.SenderName}}</span>
               <span class="message-sender-number">{{.SenderNumber}}</span>
@@ -102,11 +97,7 @@
             <li>No messages found for this conversation.</li>
             {{end}}
           </ul>
-          <a href="/group/{{.Key}}">View Group</a>
         </li>
-            {{else}}
-        <li>No conversations found.</li>
-        {{end}}
       </ul>
     </div>
   </body>

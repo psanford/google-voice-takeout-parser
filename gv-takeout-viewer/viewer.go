@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,9 +20,6 @@ var addr = flag.String("addr", ":8080", "HTTP server address")
 
 var db *sql.DB
 var templates *template.Template
-
-const conversationDetailTemplate = `
-`
 
 type Conversation struct {
 	ID           int
@@ -70,8 +68,8 @@ func main() {
 		log.Fatalf("parse templates err: %s", err)
 	}
 
-	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/conversation/", conversationDetailHandler)
+	http.HandleFunc("GET /", indexHandler)
+	http.HandleFunc("GET /group/{key}", groupHandler)
 
 	log.Printf("Starting server on %s", *addr)
 	if err := http.ListenAndServe(*addr, nil); err != nil {
@@ -80,52 +78,16 @@ func main() {
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	pageStr := r.URL.Query().Get("page")
-	page, err := strconv.Atoi(pageStr)
-	if err != nil || page < 1 {
-		page = 1
-	}
-
-	searchTerm := r.URL.Query().Get("search")
-
-	limit := 10
-	offset := (page - 1) * limit
-
-	conversations, err := getConversations(limit, offset, searchTerm)
+	groups, err := getGroups()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch conversations: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to fetch groups: %v", err), http.StatusInternalServerError)
 		return
-	}
-
-	totalCount, err := getTotalConversationCount(searchTerm)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch total conversation count: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	totalPages := (totalCount + limit - 1) / limit
-
-	var pages []int
-	for i := 1; i <= totalPages; i++ {
-		pages = append(pages, i)
 	}
 
 	data := struct {
-		Conversations []Conversation
-		CurrentPage   int
-		TotalPages    int
-		PrevPage      int
-		NextPage      int
-		Pages         []int
-		SearchTerm    string
+		Groups []Group
 	}{
-		Conversations: conversations,
-		CurrentPage:   page,
-		TotalPages:    totalPages,
-		PrevPage:      page - 1,
-		NextPage:      page + 1,
-		Pages:         pages,
-		SearchTerm:    searchTerm,
+		Groups: groups,
 	}
 
 	if err := templates.ExecuteTemplate(w, "index.html", data); err != nil {
@@ -133,51 +95,251 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func conversationDetailHandler(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Path[len("/conversation/"):]
-	id, err := strconv.Atoi(idStr)
+func groupHandler(w http.ResponseWriter, r *http.Request) {
+	groupKey := r.PathValue("key")
+
+	contactIDStrs := strings.Split(groupKey, ",")
+
+	contactIDs := make([]int, len(contactIDStrs))
+	for i, cid := range contactIDStrs {
+		id, err := strconv.Atoi(cid)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to parse group id: %s", err), http.StatusBadRequest)
+			return
+		}
+		contactIDs[i] = id
+	}
+
+	msgs, err := getMessagesForGroup(contactIDs)
 	if err != nil {
-		http.Error(w, "Invalid conversation ID", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("Failed to fetch messages: %s", err), http.StatusInternalServerError)
 		return
 	}
 
-	conversation, err := getConversationByID(id)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch conversation: %v", err), http.StatusInternalServerError)
-		return
+	g := Group{
+		Key: groupKey,
 	}
 
-	transcript, err := getTranscript(id, conversation.Type)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch transcript: %v", err), http.StatusInternalServerError)
-		return
-	}
-	conversation.Transcript = transcript
+	seenParticipants := make(map[int]struct{})
+	for _, msg := range msgs {
 
-	messages, err := getMessagesByConversationID(id)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch messages: %v", err), http.StatusInternalServerError)
-		return
-	}
+		if msg.Timestamp.After(g.Timestamp) {
+			g.Timestamp = msg.Timestamp
+		}
 
-	participants, err := getParticipants(id)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch participants: %v", err), http.StatusInternalServerError)
-		return
+		if _, seen := seenParticipants[msg.SenderContactID]; seen {
+			continue
+		}
+		p := Participant{
+			ContactID:   msg.SenderContactID,
+			Name:        msg.SenderName,
+			PhoneNumber: msg.SenderNumber,
+		}
+		g.Participants = append(g.Participants, p)
+		seenParticipants[p.ContactID] = struct{}{}
 	}
-	conversation.Participants = participants
 
 	data := struct {
-		Conversation Conversation
-		Messages     []Message
+		Group    Group
+		Messages []Message
 	}{
-		Conversation: conversation,
-		Messages:     messages,
+		Group:    g,
+		Messages: msgs,
 	}
 
-	if err := templates.ExecuteTemplate(w, "conversation.html", data); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
+	if err := templates.ExecuteTemplate(w, "group.html", data); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to render template: %s", err), http.StatusInternalServerError)
 	}
+}
+
+func getMessagesForGroup(contactIDs []int) ([]Message, error) {
+	contactMap := make(map[int]struct{})
+	for _, contactID := range contactIDs {
+		contactMap[contactID] = struct{}{}
+	}
+
+	query := "SELECT contact_id, conversation_id from participant order by conversation_id"
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query participant: %s", err)
+	}
+
+	var (
+		conversationIDs []int
+
+		seenContactsForConversation = make(map[int]struct{})
+		currentConvID               = -1
+		validConv                   = true
+	)
+
+	for rows.Next() {
+		var contactID, conversationID int
+		var err = rows.Scan(&contactID, &conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan conversation row: %s", err)
+		}
+
+		if currentConvID < 0 {
+			currentConvID = conversationID
+		} else if currentConvID != conversationID {
+			if validConv && len(seenContactsForConversation) == len(contactIDs) {
+				conversationIDs = append(conversationIDs, currentConvID)
+			}
+
+			validConv = true
+			currentConvID = conversationID
+			seenContactsForConversation = make(map[int]struct{})
+		}
+
+		if _, found := contactMap[contactID]; !found {
+			validConv = false
+		} else {
+			seenContactsForConversation[contactID] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating conversation rows: %v", err)
+	}
+
+	if validConv {
+		conversationIDs = append(conversationIDs, currentConvID)
+	}
+
+	qs := make([]string, len(conversationIDs))
+	for i := range qs {
+		qs[i] = "?"
+	}
+	qsStr := strings.Join(qs, ",")
+
+	query = `
+		SELECT m.id, m.timestamp, m.sender_contact_id, c.name, c.phone_number, m.content, i.image_url
+		FROM message m
+		LEFT JOIN image i ON m.id = i.message_id
+		LEFT JOIN contact c ON m.sender_contact_id = c.id
+		WHERE m.conversation_id in (%s)
+		ORDER BY m.timestamp DESC
+	`
+	query = fmt.Sprintf(query, qsStr)
+	convIDs := make([]any, len(conversationIDs))
+	for i, cid := range conversationIDs {
+		convIDs[i] = cid
+	}
+	rows, err = db.Query(query, convIDs...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %v", err)
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var m Message
+		err := rows.Scan(&m.ID, &m.Timestamp, &m.SenderContactID, &m.SenderName, &m.SenderNumber, &m.Content, &m.ImageURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan message row: %v", err)
+		}
+		messages = append(messages, m)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating message rows: %v", err)
+	}
+
+	return messages, nil
+}
+
+type Group struct {
+	Key                string
+	Type               string
+	Timestamp          time.Time
+	LastConversationID int
+	Participants       []Participant
+	RecentMessages     []Message
+}
+
+func getGroups() ([]Group, error) {
+	query := `SELECT conversation.id, conversation.type, conversation.timestamp,
+            contact.id, contact.name, contact.phone_number
+            FROM conversation, participant, contact
+            WHERE participant.conversation_id = conversation.id
+            AND participant.contact_id = contact.id
+            ORDER BY conversation.timestamp DESC`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query groups: %v", err)
+	}
+
+	var (
+		groupsByParticipants = make(map[string]Group)
+		groups               = make([]Group, 0, 1000)
+		currentConvID        = -1
+
+		currentConversation Conversation
+		currentParticipants []Participant
+	)
+
+	makeGroup := func() error {
+		contactIDs := make([]int, len(currentParticipants))
+		for i, p := range currentParticipants {
+			contactIDs[i] = p.ContactID
+		}
+		sort.Sort(sort.IntSlice(contactIDs))
+
+		contactIDStrs := make([]string, len(contactIDs))
+		for i, cid := range contactIDs {
+			contactIDStrs[i] = strconv.Itoa(cid)
+		}
+
+		groupKey := strings.Join(contactIDStrs, ",")
+
+		if _, found := groupsByParticipants[groupKey]; !found {
+			msgs, err := getMessagesByConversationID(currentConversation.ID)
+			if err != nil {
+				return fmt.Errorf("get messages for conversation %d err: %s", currentConversation.ID, err)
+			}
+			group := Group{
+				Key:                groupKey,
+				Type:               currentConversation.Type,
+				Timestamp:          currentConversation.Timestamp,
+				LastConversationID: currentConversation.ID,
+				Participants:       currentParticipants,
+				RecentMessages:     msgs,
+			}
+			groupsByParticipants[groupKey] = group
+			groups = append(groups, group)
+		}
+
+		return nil
+	}
+
+	for rows.Next() {
+		var c Conversation
+		var p Participant
+		var err = rows.Scan(&c.ID, &c.Type, &c.Timestamp, &p.ContactID, &p.Name, &p.PhoneNumber)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan conversation+participant+contact row: %v", err)
+		}
+
+		if currentConvID < 0 {
+			currentConvID = c.ID
+		} else if currentConvID != c.ID {
+			err = makeGroup()
+			if err != nil {
+				return nil, err
+			}
+			currentParticipants = make([]Participant, 0)
+			currentConvID = c.ID
+			currentConversation = c
+		}
+
+		currentParticipants = append(currentParticipants, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating conversation rows: %v", err)
+	}
+
+	err = makeGroup()
+
+	return groups, nil
 }
 
 func getConversations(limit, offset int, searchTerm string) ([]Conversation, error) {
