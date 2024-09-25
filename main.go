@@ -25,6 +25,7 @@ type Conversation struct {
 	Messages     []Message         `json:"messages,omitempty"`
 	Transcript   string            `json:"transcript,omitempty"`
 	SourceFile   string            `json:"source_file"`
+	SenderInfo   map[string]string `json:"-"`
 }
 
 type Message struct {
@@ -124,6 +125,12 @@ func outputSQLite(db *sql.DB, conv Conversation) {
 
 func createTables(db *sql.DB) {
 	createTableQueries := []string{
+		`CREATE TABLE IF NOT EXISTS contacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT,
+			phone_number TEXT,
+			UNIQUE(name, phone_number)
+		)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			type TEXT,
@@ -135,18 +142,18 @@ func createTables(db *sql.DB) {
 		`CREATE TABLE IF NOT EXISTS participants (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			conversation_id INTEGER,
-			name TEXT,
-			phone_number TEXT,
-			FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+			contact_id INTEGER,
+			FOREIGN KEY (conversation_id) REFERENCES conversations (id),
+			FOREIGN KEY (contact_id) REFERENCES contacts (id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			conversation_id INTEGER,
 			timestamp DATETIME,
-			sender TEXT,
-			sender_number TEXT,
+			sender_contact_id INTEGER,
 			content TEXT,
-			FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+			FOREIGN KEY (conversation_id) REFERENCES conversations (id),
+			FOREIGN KEY (sender_contact_id) REFERENCES contacts (id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS images (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,23 +205,48 @@ func insertConversation(db *sql.DB, conv Conversation) {
 		return
 	}
 
-	// Insert participants
-	partStmt, err := tx.Prepare("INSERT INTO participants (conversation_id, name, phone_number) VALUES (?, ?, ?)")
+	// Insert contacts and participants
+	contactStmt, err := tx.Prepare("INSERT OR IGNORE INTO contacts (name, phone_number) VALUES (?, ?)")
+	if err != nil {
+		log.Printf("Failed to prepare contact statement: %v", err)
+		return
+	}
+	defer contactStmt.Close()
+
+	partStmt, err := tx.Prepare("INSERT INTO participants (conversation_id, contact_id) VALUES (?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare participant statement: %v", err)
 		return
 	}
 	defer partStmt.Close()
 
-	for name, number := range conv.Participants {
-		if _, err := partStmt.Exec(convID, name, number); err != nil {
+	contactIDs := make(map[string]int64)
+
+	for name, number := range conv.SenderInfo {
+		_, err := contactStmt.Exec(name, number)
+		if err != nil {
+			log.Printf("Failed to insert contact: %v", err)
+			return
+		}
+
+		var contactID int64
+		err = tx.QueryRow("SELECT id FROM contacts WHERE name = ? AND phone_number = ?", name, number).Scan(&contactID)
+		if err != nil {
+			log.Printf("Failed to get contact ID: %v", err)
+			return
+		}
+
+		contactIDs[name] = contactID
+
+		_, err = partStmt.Exec(convID, contactID)
+		if err != nil {
 			log.Printf("Failed to insert participant: %v", err)
 			return
 		}
 	}
 
 	// Insert messages and images
-	msgStmt, err := tx.Prepare("INSERT INTO messages (conversation_id, timestamp, sender, sender_number, content) VALUES (?, ?, ?, ?, ?)")
+	msgStmt, err := tx.Prepare("INSERT INTO messages (conversation_id, timestamp, sender_contact_id, content) VALUES (?, ?, ?, ?)")
 	if err != nil {
 		log.Printf("Failed to prepare message statement: %v", err)
 		return
@@ -236,7 +268,13 @@ func insertConversation(db *sql.DB, conv Conversation) {
 	defer mediaStmt.Close()
 
 	for _, msg := range conv.Messages {
-		msgResult, err := msgStmt.Exec(convID, msg.Timestamp, msg.Sender, msg.SenderNumber, msg.Content)
+		senderContactID, ok := contactIDs[msg.Sender]
+		if !ok {
+			log.Printf("Failed to find contact ID for sender: %s", msg.Sender)
+			return
+		}
+
+		msgResult, err := msgStmt.Exec(convID, msg.Timestamp, senderContactID, msg.Content)
 		if err != nil {
 			log.Printf("Failed to insert message: %v", err)
 			return
@@ -301,6 +339,7 @@ func parseFile(lgr *slog.Logger, r io.Reader, filename string) (Conversation, er
 
 	conversation := Conversation{
 		Participants: make(map[string]string),
+		SenderInfo:   make(map[string]string),
 	}
 	var f func(*html.Node)
 	f = func(n *html.Node) {
@@ -332,7 +371,7 @@ func parseFile(lgr *slog.Logger, r io.Reader, filename string) (Conversation, er
 							for k, v := range parseParticipants(lgr, n) {
 								conversation.Participants[k] = v
 							}
-							conversation.Messages = parseMessages(lgr, n)
+							conversation.Messages, conversation.SenderInfo = parseMessages(lgr, n)
 							if len(conversation.Messages) > 0 {
 								conversation.Timestamp = conversation.Messages[0].Timestamp
 							}
@@ -463,15 +502,17 @@ func extractTitle(n *html.Node) string {
 	return title
 }
 
-func parseMessages(lgr *slog.Logger, n *html.Node) []Message {
+func parseMessages(lgr *slog.Logger, n *html.Node) ([]Message, map[string]string) {
 	var messages []Message
+	senderInfo := make(map[string]string)
 	var f func(*html.Node)
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "div" {
 			for _, a := range n.Attr {
 				if a.Key == "class" && a.Val == "message" {
-					msg := parseMessage(n)
+					msg, senderName, senderNumber := parseMessage(n)
 					messages = append(messages, msg)
+					senderInfo[senderName] = senderNumber
 				}
 			}
 		}
@@ -480,11 +521,12 @@ func parseMessages(lgr *slog.Logger, n *html.Node) []Message {
 		}
 	}
 	f(n)
-	return messages
+	return messages, senderInfo
 }
 
-func parseMessage(n *html.Node) Message {
+func parseMessage(n *html.Node) (Message, string, string) {
 	var msg Message
+	var senderName, senderNumber string
 	var f func(*html.Node)
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode {
@@ -496,7 +538,7 @@ func parseMessage(n *html.Node) Message {
 					}
 				}
 			case "cite":
-				msg.Sender, msg.SenderNumber = parseSenderAndNumber(n)
+				senderName, senderNumber = parseSenderAndNumber(n)
 			case "q":
 				msg.Content = extractText(n)
 			case "img":
@@ -512,7 +554,9 @@ func parseMessage(n *html.Node) Message {
 		}
 	}
 	f(n)
-	return msg
+	msg.Sender = senderName
+	msg.SenderNumber = senderNumber
+	return msg, senderName, senderNumber
 }
 
 func parseSenderAndNumber(n *html.Node) (string, string) {
